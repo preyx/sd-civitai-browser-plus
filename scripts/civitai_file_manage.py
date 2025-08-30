@@ -721,6 +721,7 @@ def clean_description(desc):
     except ImportError:
         print('Python module "BeautifulSoup" was not imported correctly, cannot clean description. Please try to restart or install it manually.')
         cleaned_text = desc
+    return cleaned_text.strip()
 
 def make_dir(path):
     try:
