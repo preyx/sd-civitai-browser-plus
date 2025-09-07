@@ -41,7 +41,6 @@ gl.init()
 
 css_path = Path(__file__).resolve().parents[1] / 'style_html.css'
 no_update = False
-from_ver = False
 from_tag = False
 from_installed = False
 try:
@@ -682,10 +681,7 @@ def is_image_url(url):
 
 ## === ANXETY EDITs ===
 def clean_description(desc):
-    """
-    This function cleans up HTML descriptions for better readability.
-    Fix taken from PR #384.
-    """
+    """This function cleans up HTML descriptions for better readability"""
     try:
         # Flatten to single-line string
         cleaned_lines = [line.strip() for line in desc.splitlines() if line.strip()]
@@ -732,6 +728,8 @@ def clean_description(desc):
         print('Python module "BeautifulSoup" was not imported correctly, cannot clean description. Please try to restart or install it manually.')
         cleaned_text = desc
 
+    return cleaned_text.strip()
+
 def make_dir(path):
     try:
         if not os.path.exists(path):
@@ -763,6 +761,17 @@ def save_model_info(install_path, file_name, sub_folder, sha256=None, preview_ht
 
     if not api_response:
         api_response = gl.json_data
+
+    # Try to find SHA256 from existing JSON file if not provided
+    if not sha256:
+        existing_json_file = os.path.splitext(os.path.join(install_path, file_name))[0] + '.json'
+        if os.path.exists(existing_json_file):
+            try:
+                with open(existing_json_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    sha256 = data.get('sha256')
+            except Exception as e:
+                print(f"Failed to read {existing_json_file}: {e}")
 
     result = find_and_save(api_response, sha256, file_name, json_file, False, overwrite_toggle)
     if result != 'found':
@@ -796,78 +805,114 @@ def save_model_info(install_path, file_name, sub_folder, sha256=None, preview_ht
             with open(path_to_new_file, mode='w', encoding='utf-8') as f:
                 json.dump(gl.json_info, f, indent=4, ensure_ascii=False)
 
+def find_model_version_by_sha256(api_response, sha256):
+    """Find the specific model version that matches the given SHA256 hash."""
+    for item in api_response.get('items', []):
+        for model_version in item.get('modelVersions', []):
+            for file in model_version.get('files', []):
+                file_sha256 = file.get('hashes', {}).get('SHA256', '')
+                if _api.normalize_sha256(file_sha256) == _api.normalize_sha256(sha256):
+                    return model_version, item
+    return None, None
 
-def find_and_save(api_response, sha256=None, file_name=None, json_file=None, no_hash=None, overwrite_toggle=None):
-    save_desc = getattr(opts, 'model_desc_to_json', True)
+def find_model_version_by_filename(api_response, file_name):
+    """Find the specific model version that matches the given filename."""
     for item in api_response.get('items', []):
         for model_version in item.get('modelVersions', []):
             for file in model_version.get('files', []):
                 file_name_api = file.get('name', '')
-                sha256_api = file.get('hashes', {}).get('SHA256', '')
+                if file_name == file_name_api:
+                    return model_version, item
+    return None, None
 
-                if file_name == file_name_api if no_hash else sha256 == sha256_api:
-                    gl.json_info = item
-                    trained_words = model_version.get('trainedWords', [])
+## === ANXETY EDITs ===
+def find_and_save(api_response, sha256=None, file_name=None, json_file=None, no_hash=None, overwrite_toggle=None):
+    save_desc = getattr(opts, 'model_desc_to_json', True)
+    
+    # Find the specific model version based on SHA256 or filename
+    if no_hash:
+        model_version, item = find_model_version_by_filename(api_response, file_name)
+    else:
+        model_version, item = find_model_version_by_sha256(api_response, sha256)
+    
+    if model_version and item:
+        gl.json_info = item
+        trained_words = model_version.get('trainedWords', [])
 
-                    if save_desc:
-                        description = item.get('description', '')
-                        if description is not None and description.strip():
-                            ver_description = model_version.get('description', '')
-                            # Include "About This Version" if available
-                            if ver_description is not None and ver_description.strip():
-                                description += '\n<p>About this version:</p>\n' + ver_description
+        if save_desc:
+            description = item.get('description', '')
+            if description is not None and description.strip():
+                ver_description = model_version.get('description', '')
+                # Include "About This Version" if available
+                if ver_description is not None and ver_description.strip():
+                    description += '\n<p>About this version:</p>\n' + ver_description
+                description = clean_description(description)
 
-                    base_model = model_version.get('baseModel', '')
+        base_model = model_version.get('baseModel', '')
 
-                    if base_model.startswith('SD 1'):
-                        base_model = 'SD1'
-                    elif base_model.startswith('SD 2'):
-                        base_model = 'SD2'
-                    elif base_model.startswith('SDXL'):
-                        base_model = 'SDXL'
-                    else:
-                        base_model = 'Other'
+        if base_model.startswith('SD 1'):
+            base_model = 'SD1'
+        elif base_model.startswith('SD 2'):
+            base_model = 'SD2'
+        elif base_model.startswith('SDXL'):
+            base_model = 'SDXL'
+        else:
+            base_model = 'Other'
 
-                    if isinstance(trained_words, list):
-                        trained_tags = ','.join(trained_words)
-                        trained_tags = re.sub(r'<[^>]*:[^>]*>', '', trained_tags)
-                        trained_tags = re.sub(r', ?', ', ', trained_tags)
-                        trained_tags = trained_tags.strip(', ')
-                    else:
-                        trained_tags = trained_words
+        if isinstance(trained_words, list):
+            trained_tags = ','.join(trained_words)
+            trained_tags = re.sub(r'<[^>]*:[^>]*>', '', trained_tags)
+            trained_tags = re.sub(r', ?', ', ', trained_tags)
+            trained_tags = trained_tags.strip(', ')
+        else:
+            trained_tags = trained_words
 
-                    if os.path.exists(json_file):
-                        with open(json_file, 'r', encoding='utf-8') as f:
-                            try:
-                                content = json.load(f)
-                            except:
-                                content = {}
-                    else:
-                        content = {}
-                    changed = False
-                    if overwrite_toggle == False:
-                        if 'activation text' not in content:
-                            content['activation text'] = trained_tags
-                            changed = True
-                        if save_desc and ('description' not in content):
-                            content['description'] = description
-                            changed = True
-                        if 'sd version' not in content:
-                            content['sd version'] = base_model
-                            changed = True
-                    else:
-                        content['activation text'] = trained_tags
-                        if save_desc:
-                            content['description'] = description
-                        content['sd version'] = base_model
-                        changed = True
+        if os.path.exists(json_file):
+            with open(json_file, 'r', encoding='utf-8') as f:
+                try:
+                    content = json.load(f)
+                except:
+                    content = {}
+        else:
+            content = {}
+        changed = False
+        if overwrite_toggle == False:
+            if 'activation text' not in content:
+                content['activation text'] = trained_tags
+                changed = True
+            if save_desc and ('description' not in content):
+                content['description'] = description
+                changed = True
+            if 'sd version' not in content:
+                content['sd version'] = base_model
+                changed = True
+            # Add new fields for model and version information
+            if 'modelId' not in content:
+                content['modelId'] = item.get('id')
+                changed = True
+            if 'modelVersionId' not in content:
+                content['modelVersionId'] = model_version.get('id')
+                changed = True
+            if 'modelPageURL' not in content:
+                content['modelPageURL'] = f"https://civitai.com/models/{item.get('id')}"
+                changed = True
+        else:
+            content['activation text'] = trained_tags
+            if save_desc:
+                content['description'] = description
+            content['sd version'] = base_model
+            # Always update these fields when overwrite is enabled
+            content['modelId'] = item.get('id')
+            content['modelVersionId'] = model_version.get('id')
+            content['modelPageURL'] = f"https://civitai.com/models/{item.get('id')}"
+            changed = True
 
-                    with open(json_file, 'w', encoding='utf-8') as f:
-                        json.dump(content, f, indent=4)
+        with open(json_file, 'w', encoding='utf-8') as f:
+            json.dump(content, f, indent=4)
 
-                    if changed:
-                        print(f"Model info saved to: {json_file}")
-                    return 'found'
+        if changed:
+            print(f"Model info saved to: {json_file}")
+        return 'found'
 
     return 'not found'
 
@@ -924,6 +969,7 @@ def get_models(file_path, gen_hash=None):
 
                     data['modelId'] = modelId
                     data['modelVersionId'] = modelVersionId
+                    data['modelPageURL'] = f"https://civitai.com/models/{modelId}"
                     data['sha256'] = sha256.upper()
 
                     with open(json_file, 'w', encoding='utf-8') as f:
@@ -934,6 +980,7 @@ def get_models(file_path, gen_hash=None):
                 data = {
                     'modelId': modelId,
                     'modelVersionId': modelVersionId,
+                    'modelPageUrl': f"https://civitai.com/models/{modelId}",
                     'sha256': sha256.upper()
                 }
                 with open(json_file, 'w', encoding='utf-8') as f:
@@ -950,9 +997,9 @@ def get_models(file_path, gen_hash=None):
         print(f"An error occurred for {file_path}: {str(e)}")
         return None
 
+## === ANXETY EDITs ===
 def version_match(file_paths, api_response):
     updated_models = []
-    outdated_models = []
     sha256_hashes = {}
 
     for file_path in file_paths:
@@ -982,7 +1029,7 @@ def version_match(file_paths, api_response):
         if not model_versions:
             continue
 
-        for idx, model_version in enumerate(model_versions):
+        for model_version in model_versions:
             files = model_version.get('files', [])
             match_found = False
             for file_entry in files:
@@ -996,13 +1043,10 @@ def version_match(file_paths, api_response):
                     break
 
             if match_found:
-                if idx == 0:
-                    updated_models.append((f"&ids={item['id']}", item['name']))
-                else:
-                    outdated_models.append((f"&ids={item['id']}", item['name']))
+                updated_models.append((f"&ids={item['id']}", item['name']))
                 break
 
-    return updated_models, outdated_models
+    return updated_models
 
 def get_content_choices(scan_choices=False):
     use_LORA = getattr(opts, 'use_LORA', False)
@@ -1036,15 +1080,14 @@ def get_save_path_and_name(install_path, file_name, api_response, sub_folder=Non
 
     return save_path, name
 
-def file_scan(folders, ver_finish, tag_finish, installed_finish, preview_finish, overwrite_toggle, tile_count, gen_hash, create_html, progress=gr.Progress() if queue else None):
+## === ANXETY EDITs ===
+def file_scan(folders, tag_finish, installed_finish, preview_finish, overwrite_toggle, tile_count, gen_hash, create_html, progress=gr.Progress() if queue else None):
     global no_update
     proxies, ssl = _api.get_proxies()
     gl.scan_files = True
     no_update = False
 
-    if from_ver:
-        number = _download.random_number(ver_finish)
-    elif from_tag:
+    if from_tag:
         number = _download.random_number(tag_finish)
     elif from_installed:
         number = _download.random_number(installed_finish)
@@ -1221,46 +1264,19 @@ def file_scan(folders, ver_finish, tag_finish, installed_finish, preview_finish,
     if progress != None:
         progress(1, desc='Processing final results...')
 
-    if from_ver:
-        updated_models, outdated_models = version_match(file_paths, api_response)
-
-        updated_set = set(updated_models)
-        outdated_set = set(outdated_models)
-        outdated_set = {model for model in outdated_set if model[0] not in {updated_model[0] for updated_model in updated_set}}
-
-        all_model_ids = [model[0] for model in outdated_set]
-        all_model_names = [model[1] for model in outdated_set]
-
-        for model_name in all_model_names:
-            print(f'"{model_name}" is currently outdated.')
-
-        if len(all_model_ids) == 0:
-            no_update = True
-            gl.scan_files = False
-            return (
-                gr.HTML.update(value='<div style="font-size: 24px; text-align: center; margin: 50px !important;">No updates found for selected models.</div>'),
-                gr.Textbox.update(value=number)
-            )
-
     model_chunks = list(chunks(all_model_ids, tile_count))
 
     base_url = "https://civitai.com/api/v1/models?limit=100&nsfw=true"
     gl.url_list = {i + 1: f"{base_url}{''.join(chunk)}" for i, chunk in enumerate(model_chunks)}
 
-    if from_ver:
-        gl.scan_files = False
-        return (
-            gr.HTML.update(value='<div style="font-size: 24px; text-align: center; margin: 50px !important;">Outdated models have been found.<br>Please press the button above to load the models into the browser tab</div>'),
-            gr.Textbox.update(value=number)
-        )
-
-    elif from_installed:
+    if from_installed:
         gl.scan_files = False
         return (
             gr.HTML.update(value='<div style="font-size: 24px; text-align: center; margin: 50px !important;">Installed models have been loaded.<br>Please press the button above to load the models into the browser tab</div>'),
             gr.Textbox.update(value=number)
         )
 
+    ## === ANXETY EDITs ===
     elif from_tag:
         completed_tags = 0
         tag_count = len(file_paths)
@@ -1268,11 +1284,34 @@ def file_scan(folders, ver_finish, tag_finish, installed_finish, preview_finish,
         for file_path, id_value in zip(file_paths, all_ids):
             install_path, file_name = os.path.split(file_path)
             save_path, name = get_save_path_and_name(install_path, file_name, api_response)
-            model_versions = _api.update_model_versions(id_value, api_response)
+            
+            # Get SHA256 hash for the file to find the specific version
+            file_sha256 = None
+            json_file = os.path.splitext(file_path)[0] + '.json'
+            if os.path.exists(json_file):
+                try:
+                    with open(json_file, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                        file_sha256 = data.get('sha256')
+                except Exception as e:
+                    print(f"Failed to read {json_file}: {e}")
+            
+            # Find the specific model version based on SHA256 or filename
+            if file_sha256:
+                model_version, item = find_model_version_by_sha256(api_response, file_sha256)
+            else:
+                model_version, item = find_model_version_by_filename(api_response, file_name)
+            
             html_path = os.path.join(save_path, f'{name}.html')
 
             if create_html and not os.path.exists(html_path) or create_html and overwrite_toggle:
-                preview_html = _api.update_model_info(None, model_versions.get('value'), True, id_value, api_response, True)
+                if model_version and item:
+                    # Use the specific model version name for HTML generation
+                    preview_html = _api.update_model_info(None, model_version.get('name'), True, id_value, api_response, True)
+                else:
+                    # Fallback to first version if specific version not found
+                    model_versions = _api.update_model_versions(id_value, api_response)
+                    preview_html = _api.update_model_info(None, model_versions.get('value'), True, id_value, api_response, True)
             else:
                 preview_html = None
             completed_tags += 1
@@ -1282,7 +1321,7 @@ def file_scan(folders, ver_finish, tag_finish, installed_finish, preview_finish,
                     desc=f"Saving tags{' & HTML' if preview_html else ''}... {completed_tags}/{tag_count} | {name}"
                 )
             sub_folder = os.path.normpath(os.path.relpath(install_path, gl.main_folder))
-            save_model_info(install_path, file_name, sub_folder, preview_html=preview_html, api_response=api_response, overwrite_toggle=overwrite_toggle)
+            save_model_info(install_path, file_name, sub_folder, sha256=file_sha256, preview_html=preview_html, api_response=api_response, overwrite_toggle=overwrite_toggle)
         if progress != None:
             progress(1, desc='All tags succesfully saved!')
         gl.scan_files = False
@@ -1316,7 +1355,6 @@ def finish_returns():
         gr.Button.update(interactive=True, visible=True),
         gr.Button.update(interactive=True, visible=True),
         gr.Button.update(interactive=True, visible=True),
-        gr.Button.update(interactive=True, visible=True),
         gr.Button.update(interactive=True, visible=False),  # Organize models hidden until implemented
         gr.Button.update(interactive=False, visible=False)
     )
@@ -1328,20 +1366,18 @@ def start_returns(number):
         gr.Button.update(interactive=True, visible=True),
         gr.Button.update(interactive=False, visible=True),
         gr.Button.update(interactive=False, visible=True),
-        gr.Button.update(interactive=False, visible=True),
         gr.Button.update(interactive=False, visible=False),  # Organize models hidden until implemented
         gr.HTML.update(value='<div style="min-height: 100px;"></div>')
     )
 
+## === ANXETY EDITs ===
 def set_globals(input_global=None):
-    global from_tag, from_ver, from_installed, from_preview, from_organize
-    from_tag = from_ver = from_installed = from_preview = from_organize = False
+    global from_tag, from_installed, from_preview, from_organize
+    from_tag = from_installed = from_preview = from_organize = False
     if input_global == 'reset':
         return
     elif input_global == 'from_tag':
         from_tag = True
-    elif input_global == 'from_ver':
-        from_ver = True
     elif input_global == 'from_installed':
         from_installed = True
     elif input_global == 'from_preview':
@@ -1364,11 +1400,6 @@ def installed_models_start(installed_start):
     number = _download.random_number(installed_start)
     return start_returns(number)
 
-def ver_search_start(ver_start):
-    set_globals('from_ver')
-    number = _download.random_number(ver_start)
-    return start_returns(number)
-
 def organize_start(organize_start):
     set_globals('from_organize')
     number = _download.random_number(organize_start)
@@ -1388,20 +1419,19 @@ def scan_finish():
         gr.Button.update(interactive=no_update, visible=no_update),
         gr.Button.update(interactive=no_update, visible=no_update),
         gr.Button.update(interactive=no_update, visible=no_update),
-        gr.Button.update(interactive=no_update, visible=no_update),
         gr.Button.update(interactive=no_update, visible=False),
         gr.Button.update(interactive=False, visible=False),
         gr.Button.update(interactive=not no_update, visible=not no_update)
     )
 
+## === ANXETY EDITs ===
 def load_to_browser(content_type, sort_type, period_type, use_search_term, search_term, tile_count, base_filter, nsfw):
-    global from_ver, from_installed
+    global from_installed
 
     model_list_return = _api.initial_model_page(content_type, sort_type, period_type, use_search_term, search_term, 1, base_filter, False, nsfw, tile_count, True)
-    from_ver, from_installed = False, False
+    from_installed = False
     return (
         *model_list_return,
-        gr.Button.update(interactive=True, visible=True),
         gr.Button.update(interactive=True, visible=True),
         gr.Button.update(interactive=True, visible=True),
         gr.Button.update(interactive=True, visible=True),
